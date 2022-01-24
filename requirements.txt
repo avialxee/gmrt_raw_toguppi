@@ -1,2 +1,1 @@
-baseband
-astropy
+numpy
