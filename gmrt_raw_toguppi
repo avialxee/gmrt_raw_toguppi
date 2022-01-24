@@ -5,12 +5,13 @@ import numpy as np
 from pathlib import Path
 from baseband import guppi
 import sys
-from os import path
+from os import path, system
 import time
 import argparse
 import astropy.units as u
+import warnings
 
-def gmrt_guppi(rawfile, npol=2, header=None, chunk=None, samples_per_frame=4096, nchan=1):
+def gmrt_guppi_bb(rawfile, npol=2, header=None, chunk=None, samples_per_frame=4096, nchan=1):
     """
     To read gmrt raw voltages file of GWB to convert to guppi raw
 
@@ -118,6 +119,40 @@ def gmrt_guppi(rawfile, npol=2, header=None, chunk=None, samples_per_frame=4096,
         return f'file does not exist : {rawfile}'
 
 
+def pasvraw(rawfile, nchan, chunk=None):
+    """
+    returns raw corrected FFT calculated value from PASV file,
+    
+    shape (numpy.ndarray)
+    -----------------
+    (nchan, totsamples_eachchan)
+    
+    params
+    --------
+    totsamples_eachchan = 2 * time samples (real, complex)
+    nchan = 2048
+    
+    """
+    
+    dt = np.dtype([
+        ('re', '<i1'), ('im','<i1') # 1 byte signed integer (little endian)
+    ])
+    if not chunk:
+        chunk=path.getsize(rawfile)        
+    if chunk%nchan !=0:
+        extra_chunk=chunk%nchan
+        warnings.warn(f'Ignoring last {extra_chunk} bytes!')
+        chunk=chunk-extra_chunk
+    np_data = np.memmap(rawfile, dtype='<i1', mode='r', shape=(chunk,) ).copy()
+    samplechfactored=nchan*2 # for real and imaginary
+    totsamples_eachchan=int(chunk/samplechfactored)
+    
+    b=np.hstack(np_data.reshape(totsamples_eachchan,nchan,2))
+    b=np.vstack([b,np.zeros(np.shape(b[0]))])
+    b[nchan,:][::2]=b[0][1::2] # real of 2048 = im of 0
+    b=np.delete(b, 0, 0)
+    return b , totsamples_eachchan
+
 def header_from_file(hfile):
     with open(hfile) as hf:
         header = defaultdict(list)
@@ -140,7 +175,7 @@ def header_from_file(hfile):
     return header
 
 
-def wheader(header, filepath='binary_header'):
+def wheader(header, filepath=None):
     #p=[f"{k} = '{header[k]}'".ljust(80," ") for k in header if (header[k] and isinstance(header[k], str))]
     #p.extend(f"{k} = {header[k]}".ljust(80," ")  for k in header if (header[k] and not isinstance(header[k], str) or (header[k]==0)))
     p=[]
@@ -148,25 +183,113 @@ def wheader(header, filepath='binary_header'):
         if (header[k] and not isinstance(header[k], str) or (header[k]==0)):
             kad = f'{k}'.ljust(8," ")
             vad = f'{header[k]}'.rjust(21," ")
-            p.append(f"{kad} = {vad}".ljust(80," "))
+            p.append(f"{kad}={vad}".ljust(80," "))
         if (header[k] and isinstance(header[k], str)):
             vad = f'{k}'.ljust(8," ")
             kad = f'{header[k]}'.ljust(8," ")
-            p.append(f"{vad} = '{kad}'".ljust(80," "))
+            p.append(f"{vad}='{kad}'".ljust(80," "))
     
     p.append(f'END'.ljust(80," "))
     agg = ''
     for pr in p:
         agg+=pr
     ##
-    with open(filepath, 'wb') as bf:
-        bf.write(bytes(agg, encoding='ascii'))
+    if filepath:
+        with open(filepath, 'wb') as bf:
+            bf.write(bytes(agg, encoding='ascii'))
         
     return agg, filepath
+
+
+def payload(rawfile, nchan, hdr_p, out_guppi , chunk=None , blocksize=None):
+    """
+    To read gmrt raw voltages file of GWB to convert to guppi raw
+
+    :USAGE:
+    --------
+    $ gmrt_raw_toguppi [-h] [-f FILENAME] [-c CHUNK] [-hdr HEADER] [-hf HEADER_FILE] [-hfo HEADER_FILE_OUTPUT]
+
+    To read gmrt raw voltages file of GWB to convert to guppi raw
+
+    optional arguments:
+    -h, --help            show this help message and exit
+    -f FILENAME, --filename FILENAME
+                        Input filename for conversion to guppiraw.
+    -c CHUNK, --chunk CHUNK
+                        Input chunk size to read the desired chunk of byte.
+    -hdr HEADER, --header HEADER
+                        Input header to inject to the raw file.
+    -hf HEADER_FILE, --header-file HEADER_FILE
+                        Input header from path to inject to the raw file.
+    -hfo HEADER_FILE_OUTPUT, --header-file-output HEADER_FILE_OUTPUT
+                        output header from path to inject to the raw file.
+    """
+
+    if blocksize is None:
+        raise Exception(f'blocksize is not provided!')
+    if not chunk:
+        chunk=path.getsize(rawfile)        
+    if chunk%nchan !=0:
+        extra_chunk=chunk%nchan
+        warnings.warn(f'Ignoring last {extra_chunk} of {chunk} bytes!')
+        chunk=chunk-extra_chunk
+    st_time = time.time()
+    hdr,hfo=wheader(header_from_file(hdr_p))
+    hdr_sz=len(hdr)
+    file_sz=path.getsize(rawfile)
+    print(f'reading from file......')
+    bdata,totsamples_eachchan= pasvraw(rawfile, 2048, chunk)
+    print(f'file copied : {np.round(time.time()-st_time, 2)}')
+    totalsamplesize = chunk/nchan
+
+    block_n=chunk/blocksize
+    
+    print(f'header size: {hdr_sz}')
+    frame_size = hdr_sz+blocksize
+    fnl_sz = block_n*frame_size
+   
+    system(f'rm -rf {out_guppi}')
+    
+    with open(out_guppi, 'ab') as cwb:
+        sz=0
+        i=0
+        totcolum = int(chunk/blocksize)
+        coleachframe=64
+        complex_col_each_frame = coleachframe/2
+        sampletime=81.92*10**(-6)
+        obs_time = complex_col_each_frame*totcolum*sampletime
+        print(f'total column: {totcolum}\n each frame column:{coleachframe}\n observation time: {obs_time}')
+        
+        samples_each_frame=totsamples_eachchan # columns in each block
+        for i in range(totcolum): # writing each block
+            
+            start=int(i*coleachframe)
+            end=start+coleachframe
+        
+            #print(start, i)
+        
+            wrb=bytes(bdata[:,start:end].astype('<i1').ravel())
+            
+            cwb.write(bytes(hdr, encoding='ascii'))
+            cwb.write(wrb)
+            
+            # printify
+            sz += frame_size
+            pct = [20,40,50,60,80,90,95,99]
+            fpc =(sz/fnl_sz)*100
+            if fpc in pct:
+                prog = f'........'*int(fpc/10)
+                print(f'{i} blocks: {np.round((sz/1048576),2)}MB\t{prog} {fpc} %')
+            
+        end_t = time.time() - st_time
+        
+        print(f'completed: {np.round((sz/1048576),2)}MB \ttime elapsed:{np.round(end_t,2)}s')
 
 parser = argparse.ArgumentParser(description="""To read gmrt raw voltages file of GWB to convert to guppi raw
 """)
 parser.add_argument('-f', '--filename',type=str,help="Input filename for conversion to guppiraw.", required=False)
+parser.add_argument('-o', '--out_guppi',type=str,help="Output guppi guppi raw file.", required=False)
+
 parser.add_argument('-c', '--chunk',type=int,help="Input chunk size to read the desired chunk of byte.", required=False)
 parser.add_argument('-hdr', '--header', type=str, help="Input header to inject to the raw file.", required=False)
 parser.add_argument('-hf', '--header-file', type=str, help="Input header from path to inject to the raw file.", required=False)
@@ -180,6 +303,13 @@ def cli():
     hfo=args.header_file_output
     hdrin=args.header
     header = defaultdict(list)
+    outguppi=args.out_guppi
+
+    # name handler
+    if not outguppi:
+        outguppi=Path(rawfile).stem
+    if not '0000.raw' in outguppi:
+        outguppi=outguppi + '.0000.raw'
     if hdrin:
         print(hdrin)
         hdrin=str(hdrin)
@@ -202,7 +332,7 @@ def cli():
             printable_header, hfile_out=wheader(header,filepath=hfo)
             print(f'header file created: {hfile_out}')
     if rawfile:
-        print(gmrt_guppi(rawfile=rawfile, chunk=chunk, header=header))
+        print(payload(rawfile, 2048, hlist, outguppi , chunk=None , blocksize=131072))
 
 if __name__=='__main__':
     cli()
