@@ -24,4 +24,5 @@ $ gmrt_raw_toguppi [-h] [-f FILENAME] [-c CHUNK] [-hdr HEADER] [-hf HEADER_FILE]
 NOTE
 ------
 
-using # in `hinput.txt` will ignore the entire field.
+- using # in `hinput.txt` will ignore the entire field.
+- change the first line to the path of your environment.
