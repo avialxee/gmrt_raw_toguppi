@@ -280,11 +280,6 @@ def payload(rawfile, nchan, hdr_p, out_guppi , chunk=None , blocksize=None):
             
             # printify
             sz += frame_size
-            pct = [20,40,50,60,80,90,95,99]
-            fpc =(sz/fnl_sz)*100
-            if fpc in pct:
-                prog = f'........'*int(fpc/10)
-                print(f'{i} blocks: {np.round((sz/1048576),2)}MB\t{prog} {fpc} %')
             
         end_t = time.time() - st_time
         
