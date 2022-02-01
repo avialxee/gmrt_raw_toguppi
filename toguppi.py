@@ -1,6 +1,7 @@
 #!/datax/scratch/AMITY_INDIA/avi/github/casadev/bin/python3.8
 
 from collections import defaultdict
+from string import whitespace
 import numpy as np
 from pathlib import Path
 from baseband import guppi
@@ -164,7 +165,7 @@ def pasvraw(rawfile, nchan, chunk=None, chunk_n=1):
         print(f'operations done...')
         return b , totsamples_eachchan
     else:
-        warning(f'extra bytes:{extra_chunk} , chunk:{chunk}, channels:{nchan}')
+        warnings.warn(f'extra bytes:{extra_chunk} , chunk:{chunk}, channels:{nchan}')
         return 0,0
 
 def header_from_file(hfile):
@@ -182,14 +183,15 @@ def header_from_file(hfile):
                     try:
                         hdrv=float(hdrv)
                     except:
-                        hdrv=str(hdrv)
+                        hdrv=str(hdrv).strip()
                 #print(f'{hdrk}={hdrv}')#, type(hdrv))
                 header[hdrk]=hdrv
                 #header[hdrk]=hdrv
     return header
 
 
-def wheader(header, filepath=None):
+
+def wheader(header, filepath=None, padding=True):
     #p=[f"{k} = '{header[k]}'".ljust(80," ") for k in header if (header[k] and isinstance(header[k], str))]
     #p.extend(f"{k} = {header[k]}".ljust(80," ")  for k in header if (header[k] and not isinstance(header[k], str) or (header[k]==0)))
     p=[]
@@ -197,16 +199,26 @@ def wheader(header, filepath=None):
         if (header[k] and not isinstance(header[k], str) or (header[k]==0)):
             kad = f'{k}'.ljust(8," ")
             vad = f'{header[k]}'.rjust(21," ")
-            p.append(f"{kad}={vad}".ljust(80," "))
-        if (header[k] and isinstance(header[k], str)):
+            p.append(f"{kad}= {vad}".ljust(80," "))
+        if (header[k] and isinstance(header[k], str) or (header[k]=='')):
             vad = f'{k}'.ljust(8," ")
             kad = f'{header[k]}'.ljust(8," ")
-            p.append(f"{vad}='{kad}'".ljust(80," "))
+            p.append(f"{vad}= '{kad}'".ljust(80," "))
     
     p.append(f'END'.ljust(80," "))
+    whitespaces=''
+    if header['DIRECTIO'] and padding:
+        npad=0
+        npad = 512-(len(p)*80)%512
+        print(f'directio:1\n {len(p)*80}\n npad:{npad}')
+        
+        whitespaces=" "*npad
+        #p.append(f'{whitespaces}')
     agg = ''
+    
     for pr in p:
         agg+=pr
+    agg+= whitespaces
     ##
     if filepath:
         with open(filepath, 'wb') as bf:
@@ -250,56 +262,52 @@ def payload(rawfile, nchan, hdr_p, out_guppi , chunk=None , blocksize=None, loop
     hdr_sz=len(hdr)
     print(f'reading from file......')
     bdata,totsamples_eachchan= pasvraw(rawfile, 2048, chunk, chunk_n)
+    bdata=bdata.astype('<i1').ravel()
     if totsamples_eachchan:
         print(f'file copied : {np.round(time.time()-st_time, 2)}')
         totalsamplesize = chunk/nchan
-
-        block_n=chunk/blocksize
-        
+        block_n=chunk/blocksize        
         print(f'header size: {hdr_sz}')
         frame_size = hdr_sz+blocksize
-        fnl_sz = block_n*frame_size
-    
+        totcolum = int(chunk/blocksize)
+        final_size = frame_size*totcolum
         if path.isfile(out_guppi):
             system(f'rm -rf {out_guppi}')
-        
         with open(out_guppi, 'ab') as cwb:
             sz=0
             i=0
-            totcolum = int(chunk/blocksize)
             coleachframe=64
             complex_col_each_frame = coleachframe/2
             sampletime=81.92*10**(-6)
             obs_time = complex_col_each_frame*totcolum*sampletime
-            
-            print(f'total number of blocks: {totcolum}\n blocks in each frame:{coleachframe}\n observation time: {obs_time}')
-            
+            print(f'total number of blocks: {totcolum}\n blocks in each frame:{coleachframe}\n final size: {final_size}\n observation time: {obs_time}')
             for i in range(totcolum): # writing each block
                 start=int(i*coleachframe)
-                end=start+coleachframe
-            
-                #print(start, i)
-            
-                wrb=bytes(bdata[:,start:end].astype('<i1').ravel())
-                
+                end=(start+coleachframe)
+                wrb=bytes(bdata[start:end])
                 cwb.write(bytes(hdr, encoding='ascii'))
                 cwb.write(wrb)
-                
-                # printify
                 sz += frame_size
                 
             end_t = time.time() - st_time
             print(f'file created: {out_guppi}')
             print(f'completed: {np.round((sz/1048576),2)}MB \ttime elapsed:{np.round(end_t,2)}s')
 
-parser = argparse.ArgumentParser(description="""To read gmrt raw voltages file of GWB to convert to guppi raw
-""")
+parser = argparse.ArgumentParser('gmrt_raw_toguppi',description="""To read gmrt raw voltages file of GWB to convert to guppi raw
+""", formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('-f', '--filename',type=str,help="Input filename for conversion to guppiraw.", required=False)
 parser.add_argument('-o', '--out_guppi',type=str,help="Output guppi guppi raw file.", required=False)
 parser.add_argument('-c', '--chunk',type=int,help="Input chunk size to read the desired chunk of byte.", required=False)
-parser.add_argument('-hdr', '--header', type=str, help="Input header to inject to the raw file.", required=False)
-parser.add_argument('-hf', '--header-file', type=str, help="Input header from path to inject to the raw file.", required=False)
-parser.add_argument('-hfo', '--header-file-output', type=str, help="output header from path to inject to the raw file.", required=False)
+#parser.add_argument('-hdr', '--header', type=str, help="Input header to inject to the raw file.", required=False)
+headers=parser.add_argument_group('header', """Use the following arguments to create header from an input file to inject to the raw file. 
+1) Input file should have headers in the following manner:
+    BLOCSIZE=163840 | using # will comment the entire field.
+2) use -hdr with -hf to update input file supplied field values.
+    ex: gmrt_raw_toguppi -hf=headerinput.txt -hdr='TELESCOP=uGMRT,OBSERVER=John Doe'""")
+headers.add_argument('-hdr','--header', type=str, help="Comma separated input headers to inject to the raw file.", required=False)
+headers.add_argument('-hf', '--header-file', type=str, help="Input header from path to inject to the raw file.", required=False)
+headers.add_argument('-hfo', '--header-file-output', type=str, help="Header output with the correct padding.", required=False)
+headers.add_argument('-hio', '--header-direct-io', type=bool, help='If set to False bypasses padding for DIRECTIO=1 without affecting the header values. | Default: True')
 args=parser.parse_args()
 
 def cli():
@@ -310,16 +318,21 @@ def cli():
     hdrin=args.header
     header = defaultdict(list)
     outguppi=args.out_guppi
-    
+    hio=args.header_direct_io
+    if hio is None:
+        hio=True
+    # profiler = args.profiler
+
     if outguppi:
         outguppi_stem=Path(outguppi).stem
     # name handler
     if not outguppi and rawfile:
         outguppi=Path(rawfile).stem
         
-    
+    if hlist:
+        header=header_from_file(hlist)
     if hdrin:
-        hdrin=str(hdrin)
+        hdrin=str(hdrin).strip()
         hdrdict=hdrin.split(',')
         for i in range(len(hdrdict)):
             if '=' in hdrdict[i]:
@@ -330,21 +343,18 @@ def cli():
                     try:
                         hdrv=float(hdrv)
                     except:
-                        hdrv=str(hdrv)
-                print(f'{hdrk}={hdrv}', type(hdrv))
-                header[hdrk]=hdrv
-    elif hlist:
-        header=header_from_file(hlist)
-        if hfo:
-            printable_header, hfile_out=wheader(header,filepath=hfo)
-            print(f'header file created: {hfile_out}')
+                        hdrv=str(hdrv).strip()
+                header[hdrk]=hdrv  
+    if hfo:
+        printable_header, hfile_out=wheader(header,filepath=hfo, padding=hio)
+        print(f'header file created: {hfile_out}')
     if rawfile:
         heavy_chunk=131072*3814#*1024 # 1 GB (in bytes)
         file_size=path.getsize(rawfile) # in bytes
         if file_size >= heavy_chunk:
             print(f'file size is heavy :{np.round(file_size/(1024*1024),2)}MB')
             extra_hchunk = file_size%heavy_chunk # extra heavy chunk
-            nchunk = 10#int(file_size/heavy_chunk)
+            nchunk = 2#int(file_size/heavy_chunk)
             echunk = (nchunk+1)
             for ic in range(1,echunk):
                 print(f'nchunk:{ic}/{nchunk}')
